@@ -39,18 +39,45 @@ f_ctrl              = 16e3;                         % [Hz] Controller frequency 
 % Ts_ctrl             = 12e-5;                      % [s] Controller sampling time (~8 kHz)
 
 % Motor parameters
-n_polePairs         = 15;                           % [-] Number of motor pole pairs
+n_polePairs         = 6;                           % [-] Number of motor pole pairs
 a_elecPeriod        = 360;                          % [deg] Electrical angle period
 a_elecAngle         = 60;                           % [deg] Electrical angle between two Hall sensor changing events
 a_mechAngle         = a_elecAngle / n_polePairs;    % [deg] Mechanical angle between two Hall sensor changing events
 r_whl               = 6.5 * 2.54 * 1e-2 / 2;        % [m] Wheel radius. Diameter = 6.5 inch (1 inch = 2.54 cm): Speed[kph] = rpm*(pi/30)*r_whl*3.6
 i_sca               = 50;                           % [-] [not tunable] Scalling factor A to int16 (50 = 1/0.02)
+r_mot               = 0.5;                          % [r] Phase to Phase resistance
+r_motn              = r_mot/2;                      % [r] Phase to Neutral resistance = Phase to phase / 2
+v_bus               = 24;                           % [V] bus voltage used for normalization
+f_bw                = 1000;                         % [Hz] target current-loop bandwidth
+L_ph                = 0.2e-3;                         % [H] phase-to-neutral inductance 
+
+% --- PI gains (parallel PI, normalized by Vbus) ---
+Kp = (2*pi*f_bw*L_ph) / v_bus;
+Ki = Kp * (r_motn / L_ph);                 % same as (2*pi*f_bw*r_motn)/v_bus
+
+% Target multiplier for filter cutoff vs bandwidth
+filt_mult = 3;                           % CFG_CURR_FILT_TARGET_MULT
+w_warp    = 2*pi*f_bw*Ts_ctrl;
+R         = filt_mult;
+
+warp_mult = R + (R^2*w_warp)/2 + (R^3*w_warp^2)/6 + (R^4*w_warp^3)/24 + (R^5*w_warp^4)/120;
+
+% Current filter coefficient (same formula as firmware)
+cf_curr_filt = Ts_ctrl / (Ts_ctrl + (1 / (2*pi*(f_bw*warp_mult))));
+
+% Motor Angle Measurement (e.g. using an encoder)
+b_angleMeasEna      = 1;                % [-] Enable flag for external mechanical motor angle sensor: 0 = estimated (default), 1 = measured
+a_cpr               = 65535;
+a_fcpr              = 1/65535;
 
 % Sine/Cosine wave look-up table
+a_elecoffset        = a_elecPeriod/12;
+a_mechoffset        = a_elecoffset/n_polePairs;
 res_elecAngle       = 2;
 a_elecAngle_XA      = 0:res_elecAngle:360;          % [deg] Electrical angle grid
-r_sin_M1            = sin((a_elecAngle_XA + 30)*(pi/180));  % Note: 30 deg shift is to allign it with the Hall sensors position
-r_cos_M1            = cos((a_elecAngle_XA + 30)*(pi/180));
+r_sin_M1            = sin((a_elecAngle_XA + a_elecPeriod/12)*(pi/180));  % Note: 30 deg shift is to allign it with the Hall sensors position
+r_cos_M1            = cos((a_elecAngle_XA + a_elecPeriod/12)*(pi/180));
+
 % figure
 % stairs(a_elecAngle_XA, r_sin_M1); hold on
 % stairs(a_elecAngle_XA, r_cos_M1);
@@ -68,12 +95,18 @@ OPEN_MODE           = 0;                % [-] Open mode
 VLT_MODE            = 1;                % [-] Voltage mode
 SPD_MODE            = 2;                % [-] Speed mode
 TRQ_MODE            = 3;                % [-] Torque mode
-z_ctrlModReq        = VLT_MODE;         % [-] Control Mode Request (default)
+z_ctrlModReq        = TRQ_MODE;         % [-] Control Mode Request (default)
 
 % Cruise control
 b_cruiseCtrlEna     = 0;                % [-] Cruise control enable flag: 0 = disable (default), 1 = enable
 n_cruiseMotTgt      = 0;                % [-] Cruise control motor speed target
 
+
+
+% MCU selection
+STM32F103           = 0;                % [-] Changes the maximum useable PWM resolution from 2000 to 3375
+GD32F103            = 1;
+mcu_model           = GD32F103;          
 
 %% F01_Estimations
 % Position Estimation Parameters
@@ -89,26 +122,31 @@ n_commAcvLo         = 15;               % [rpm] Commutation method activation sp
 dz_cntTrnsDetHi     = 40;               % [-] Counter gradient High for transient behavior detection (used for speed estimation)
 dz_cntTrnsDetLo     = 20;               % [-] Counter gradient Low for steady state detection (used for speed estimation)
 n_stdStillDet       = 3;                % [rpm] Speed threshold for Stand still detection
-cf_currFilt         = 0.12;             % [%] Current filter coefficient [0, 1]. Lower values mean softer filter
-
-% Motor Angle Measurement (e.g. using an encoder)
-b_angleMeasEna      = 0;                % [-] Enable flag for external mechanical motor angle sensor: 0 = estimated (default), 1 = measured
+cf_currFilt         = 0.692;             % [%] Current filter coefficient [0, 1]. Lower values mean softer filter
 
 %% F02_Diagnostics
-b_diagEna           = 1;                % [-] Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
-t_errQual           = 0.24 * f_ctrl/3;  % [s] Error qualification time
-t_errDequal         = 1.80 * f_ctrl/3;  % [s] Error dequalification time
+%b_diagEna           = 0;                % [-] Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
+%t_errQual           = 0.24 * f_ctrl/3;  % [s] Error qualification time
+%t_errDequal         = 1.80 * f_ctrl/3;  % [s] Error dequalification time
+%r_errInpTgtThres    = 600;              % [-] Error input target threshold (for "Blocked motor" detection)
+
+%% F03_Control_Mode_Manager
+%dV_openRate         = 1000 / (f_ctrl/3);% [V/s] Rate for voltage cut-off in Open Mode (Sample Time included in the rate)
+%% F02_Diagnostics
+b_diagEna           = 0;                % [-] Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
+t_errQual           = 0.24 * f_ctrl;  % [s] Error qualification time
+t_errDequal         = 1.80 * f_ctrl;  % [s] Error dequalification time
 r_errInpTgtThres    = 600;              % [-] Error input target threshold (for "Blocked motor" detection)
 
 %% F03_Control_Mode_Manager
-dV_openRate         = 1000 / (f_ctrl/3);% [V/s] Rate for voltage cut-off in Open Mode (Sample Time included in the rate)
+dV_openRate         = 1000 / (f_ctrl);% [V/s] Rate for voltage cut-off in Open Mode (Sample Time included in the rate)
 
 %% F04_Field_Weakening
 b_fieldWeakEna      = 0;                % [-] Field weakening enable flag: 0 = disable (default), 1 = enable
 r_fieldWeakHi       = 1000;             % [1000, 1500] Input target High threshold for reaching maximum Field Weakening / Phase Advance
 r_fieldWeakLo       = 750;              % [ 500, 1000] Input target Low threshold for starting Field Weakening / Phase Advance
-n_fieldWeakAuthHi   = 400;              % [rpm] Motor speed High for field weakening authorization
-n_fieldWeakAuthLo   = 300;              % [rpm] Motor speed Low for field weakening authorization
+n_fieldWeakAuthHi   = 300;              % [rpm] Motor speed High for field weakening authorization
+n_fieldWeakAuthLo   = 100;              % [rpm] Motor speed Low for field weakening authorization
 
 % FOC method
 id_fieldWeakMax     = 5 * i_sca;        % [A] Field weakening maximum current
@@ -118,46 +156,70 @@ a_phaAdvMax         = 25;               % [deg] Maximum phase advance angle
 
 
 %% F05_Field_Oriented_Control
-z_selPhaCurMeasABC  = 0;                % [-] Select measured current phases: {iA,iB} = 0; {iB,iC} = 1; {iA,iC} = 2
+z_selPhaCurMeasABC  = 2;                % [-] Select measured current phases: {iA,iB} = 0; {iB,iC} = 1; {iA,iC} = 2
 
 % Motor Limitations Calibratables
-cf_iqKiLimProt      = 60 / (f_ctrl/3);  % [-] Current limit protection integral gain (only used in VLT_MODE and SPD_MODE)
-cf_nKiLimProt       = 20 / (f_ctrl/3);  % [-] Speed limit protection integral gain (only used in VLT_MODE and TRQ_MODE)
-cf_KbLimProt        = 1000 / (f_ctrl/3);% [-] Back calculation gain for integral anti-windup
+%cf_iqKiLimProt      = 60 / (f_ctrl/3);  % [-] Current limit protection integral gain (only used in VLT_MODE and SPD_MODE)
+%cf_nKiLimProt       = 20 / (f_ctrl/3);  % [-] Speed limit protection integral gain (only used in VLT_MODE and TRQ_MODE)
+%cf_KbLimProt        = 1000 / (f_ctrl/3);% [-] Back calculation gain for integral anti-windup
+cf_iqKiLimProt      = 60 / (f_ctrl);  % [-] Current limit protection integral gain (only used in VLT_MODE and SPD_MODE)
+cf_nKiLimProt       = 20 / (f_ctrl);  % [-] Speed limit protection integral gain (only used in VLT_MODE and TRQ_MODE)
+%cf_KbLimProt         = 1000 / (f_ctrl);
+cf_KbLimProt = Simulink.Parameter;
+cf_KbLimProt.Value = 1000 / (f_ctrl);  % [-] Back calculation gain for integral anti-windup
+cf_KbLimProt.DataType = 'fixdt(0, 16, 12)'; 
+cf_KbLimProt.CoderInfo.StorageClass = 'ExportedGlobal';
 
-% Voltage Limitations
-V_margin            = 100;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
-Vd_max              = 1000 - V_margin;
-Vq_max_XA           = 0:20:Vd_max;
-Vq_max_M1           = sqrt(Vd_max^2 - Vq_max_XA.^2);  % Circle limitations look-up table
+% Voltage Limitations STM32
+V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
+STM32_Vd_max             = 1000;                                  
+STM32_Vd_max_margin      = STM32_Vd_max - V_margin;
+STM32_Vq_max_XA          = 0:30:STM32_Vd_max_margin;
+STM32_Vq_max_M1          = sqrt(STM32_Vd_max_margin^2 - STM32_Vq_max_XA.^2);
+
+% Voltage Limitations GD32
+V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
+GD32_Vd_max              = 1687; 
+GD32_Vd_max_margin       = GD32_Vd_max - V_margin;
+GD32_Vq_max_XA           = 0:20:GD32_Vd_max_margin;
+GD32_Vq_max_M1           = sqrt(GD32_Vd_max_margin^2 - GD32_Vq_max_XA.^2);  % Circle limitations look-up table
+
 % figure
 % stairs(Vq_max_XA, Vq_max_M1); legend('V_{max}');
 
 % Speed limitations
-n_max               = 1000;             % [rpm] Maximum motor speed: [-1500, 1500]
+n_max               = 1950;             % [rpm] Maximum motor speed: [-1500, 1500]
 
 % Current Limitations
-i_max               = 15;               % [A] Maximum allowed motor current (continuous)
+i_max               = 10;               % [A] Maximum allowed motor current (continuous)
 i_max               = i_max * i_sca;
-iq_maxSca_XA        = 0:0.02:0.99;
+iq_maxSca_XA        = 0:0.01:0.99;
 iq_maxSca_XA        = fixpt_evenspace_cleanup(iq_maxSca_XA, ufix(16), 2^-16);   % Make sure the data is evely spaced up to the last bit
 iq_maxSca_M1        = sqrt(1 - iq_maxSca_XA.^2);                                % Current circle limitations map
 % figure
 % stairs(iq_maxSca_XA, iq_maxSca_M1); legend('i_{maxSca}');
 %-------------------------------
 
+tgt_scale            = 2047;
+
 % Q axis control gains
-cf_iqKp             = 0.3;              % [-] P gain
-cf_iqKi             = 100 / (f_ctrl/3); % [-] I gain
+cf_iqKp             =  Kp;              % [-] P gain
+%cf_iqKi             = 400 / (f_ctrl/3); % [-] I gain
+cf_iqKi             = Ki / (f_ctrl); % [-] I gain
 
 % D axis control gains
-cf_idKp             = 0.2;              % [-] P gain
-cf_idKi             = 60 / (f_ctrl/3);  % [-] I gain
+cf_idKp             =  Kp;              % [-] P gain
+%cf_idKi             = 400 / (f_ctrl/3);  % [-] I gain
+cf_idKi             = Ki / (f_ctrl);  % [-] I gain
+
 
 % Speed control gains
 cf_nKp              = 1.18;             % [-] P gain
-cf_nKi              = 20.4 / (f_ctrl/3);% [-] I gain
+%cf_nKi              = 20.4 / (f_ctrl/3);% [-] I gain
+cf_nKi              = 20.4 / (f_ctrl);% [-] I gain
+
 %-------------------------------
+ff_gain              = ((r_motn / i_sca) * ((GD32_Vd_max_margin) / v_bus));
 
 %% F06_Control_Type_Management
 
