@@ -35,25 +35,40 @@ clc
 load BLDCmotorControl_data;
 Ts                  = 5e-6;                         % [s] Model sampling time (200 kHz)
 Ts_ctrl             = 6e-5;                         % [s] Controller sampling time (~16 kHz)
-f_ctrl              = 16e3;                         % [Hz] Controller frequency = 1/Ts_ctrl (16 kHz)
+f_ctrl              = 1/Ts_ctrl;                         % [Hz] Controller frequency = 1/Ts_ctrl (16 kHz)
 % Ts_ctrl             = 12e-5;                      % [s] Controller sampling time (~8 kHz)
 
 % Motor parameters
-n_polePairs         = 6;                           % [-] Number of motor pole pairs
+n_polePairs         = 15;                           % [-] Number of motor pole pairs
 a_elecPeriod        = 360;                          % [deg] Electrical angle period
 a_elecAngle         = 60;                           % [deg] Electrical angle between two Hall sensor changing events
 a_mechAngle         = a_elecAngle / n_polePairs;    % [deg] Mechanical angle between two Hall sensor changing events
 r_whl               = 6.5 * 2.54 * 1e-2 / 2;        % [m] Wheel radius. Diameter = 6.5 inch (1 inch = 2.54 cm): Speed[kph] = rpm*(pi/30)*r_whl*3.6
 i_sca               = 50;                           % [-] [not tunable] Scalling factor A to int16 (50 = 1/0.02)
-r_mot               = 0.5;                          % [r] Phase to Phase resistance
+r_mot               = 1;                          % [r] Phase to Phase resistance
 r_motn              = r_mot/2;                      % [r] Phase to Neutral resistance = Phase to phase / 2
 v_bus               = 24;                           % [V] bus voltage used for normalization
-f_bw                = 1000;                         % [Hz] target current-loop bandwidth
-L_ph                = 0.2e-3;                         % [H] phase-to-neutral inductance 
+f_bw                = 100;                          % [Hz] target current-loop bandwidth
+L_ph                = 0.4e-3;                       % [H] phase inductance 
+
+
+% Voltage Limitations STM32
+V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
+STM32_Vd_max             = 1000;                                  
+STM32_Vd_max_margin      = STM32_Vd_max - V_margin;
+STM32_Vq_max_XA          = 0:30:STM32_Vd_max_margin;
+STM32_Vq_max_M1          = sqrt(STM32_Vd_max_margin^2 - STM32_Vq_max_XA.^2);
+
+% Voltage Limitations GD32
+V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
+GD32_Vd_max              = 1687; 
+GD32_Vd_max_margin       = GD32_Vd_max - V_margin;
+GD32_Vq_max_XA           = 0:20:GD32_Vd_max_margin;
+GD32_Vq_max_M1           = sqrt(GD32_Vd_max_margin^2 - GD32_Vq_max_XA.^2);  % Circle limitations look-up table
 
 % --- PI gains (parallel PI, normalized by Vbus) ---
-Kp = (2*pi*f_bw*L_ph) / v_bus;
-Ki = Kp * (r_motn / L_ph);                 % same as (2*pi*f_bw*r_motn)/v_bus
+Kp = ((2*pi*f_bw*L_ph) * (GD32_Vd_max_margin/(v_bus*50)));
+Ki = ((Kp * (r_motn / (L_ph)))/f_ctrl);                 
 
 % Target multiplier for filter cutoff vs bandwidth
 filt_mult = 3;                           % CFG_CURR_FILT_TARGET_MULT
@@ -170,19 +185,6 @@ cf_KbLimProt.Value = 1000 / (f_ctrl);  % [-] Back calculation gain for integral 
 cf_KbLimProt.DataType = 'fixdt(0, 16, 12)'; 
 cf_KbLimProt.CoderInfo.StorageClass = 'ExportedGlobal';
 
-% Voltage Limitations STM32
-V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
-STM32_Vd_max             = 1000;                                  
-STM32_Vd_max_margin      = STM32_Vd_max - V_margin;
-STM32_Vq_max_XA          = 0:30:STM32_Vd_max_margin;
-STM32_Vq_max_M1          = sqrt(STM32_Vd_max_margin^2 - STM32_Vq_max_XA.^2);
-
-% Voltage Limitations GD32
-V_margin                 = 60;              % [-] Voltage margin to make sure that there is a sufficiently wide pulse for a good phase current measurement
-GD32_Vd_max              = 1687; 
-GD32_Vd_max_margin       = GD32_Vd_max - V_margin;
-GD32_Vq_max_XA           = 0:20:GD32_Vd_max_margin;
-GD32_Vq_max_M1           = sqrt(GD32_Vd_max_margin^2 - GD32_Vq_max_XA.^2);  % Circle limitations look-up table
 
 % figure
 % stairs(Vq_max_XA, Vq_max_M1); legend('V_{max}');
@@ -191,7 +193,7 @@ GD32_Vq_max_M1           = sqrt(GD32_Vd_max_margin^2 - GD32_Vq_max_XA.^2);  % Ci
 n_max               = 1950;             % [rpm] Maximum motor speed: [-1500, 1500]
 
 % Current Limitations
-i_max               = 10;               % [A] Maximum allowed motor current (continuous)
+i_max               = 20;               % [A] Maximum allowed motor current (continuous)
 i_max               = i_max * i_sca;
 iq_maxSca_XA        = 0:0.01:0.99;
 iq_maxSca_XA        = fixpt_evenspace_cleanup(iq_maxSca_XA, ufix(16), 2^-16);   % Make sure the data is evely spaced up to the last bit
@@ -203,14 +205,14 @@ iq_maxSca_M1        = sqrt(1 - iq_maxSca_XA.^2);                                
 tgt_scale            = 2047;
 
 % Q axis control gains
-cf_iqKp             =  Kp;              % [-] P gain
+cf_iqKp             =  Kp;               % [-] P gain
 %cf_iqKi             = 400 / (f_ctrl/3); % [-] I gain
-cf_iqKi             = Ki / (f_ctrl); % [-] I gain
+cf_iqKi             = Ki;                % [-] I gain
 
 % D axis control gains
-cf_idKp             =  Kp;              % [-] P gain
-%cf_idKi             = 400 / (f_ctrl/3);  % [-] I gain
-cf_idKi             = Ki / (f_ctrl);  % [-] I gain
+cf_idKp             =  Kp;               % [-] P gain
+%cf_idKi             = 400 / (f_ctrl/3); % [-] I gain
+cf_idKi             = Ki;                % [-] I gain
 
 
 % Speed control gains
@@ -218,8 +220,10 @@ cf_nKp              = 1.18;             % [-] P gain
 %cf_nKi              = 20.4 / (f_ctrl/3);% [-] I gain
 cf_nKi              = 20.4 / (f_ctrl);% [-] I gain
 
-%-------------------------------
-ff_gain              = ((r_motn / i_sca) * ((GD32_Vd_max_margin) / v_bus));
+%FeedForward
+FeedForwardEnable     = 1;
+ff_gain               = ((r_motn / i_sca) * ((GD32_Vd_max_margin) / v_bus))/4;
+%ff_gain              = 0;
 
 %% F06_Control_Type_Management
 
